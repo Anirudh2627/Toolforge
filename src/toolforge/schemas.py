@@ -36,6 +36,12 @@ class ToolForgeError(Exception):
     """Base class for all project errors."""
 
 
+#: Bumped whenever the action grammar, system-prompt template, or tool-catalog
+#: rendering changes. Evaluation runs record it so checkpoints trained under a
+#: different serialization are never silently compared (see evaluation.py).
+GRAMMAR_VERSION = "tf-gram-v1"
+
+
 class InvalidToolSpecError(ToolForgeError):
     """Raised when a ToolSpec uses unsupported schema features."""
 

@@ -142,6 +142,8 @@ class EpisodeResult:
     initial_states: dict[str, dict[str, Any]] = field(default_factory=dict)
     final_states: dict[str, dict[str, Any]] = field(default_factory=dict)
     volatile_keys: dict[str, list[str]] = field(default_factory=dict)
+    system_prompt: str = ""                # exact model-visible system prompt
+    tools: list[dict[str, Any]] = field(default_factory=list)  # model-visible tool catalog
     tool_call_count: int = 0               # executed calls (schema-valid, known tool)
     invalid_call_count: int = 0            # parse failures + schema violations + unknown tools
     parse_error_count: int = 0
@@ -156,6 +158,7 @@ class EpisodeResult:
             "trace": [t.to_dict() for t in self.trace],
             "initial_states": self.initial_states, "final_states": self.final_states,
             "volatile_keys": self.volatile_keys,
+            "system_prompt": self.system_prompt, "tools": self.tools,
             "tool_call_count": self.tool_call_count,
             "invalid_call_count": self.invalid_call_count,
             "parse_error_count": self.parse_error_count,
@@ -217,6 +220,30 @@ class Executor:
         return SYSTEM_PROMPT_TEMPLATE.format(
             tool_catalog=render_tool_catalog(specs), current_date=current_date)
 
+    def initial_messages(self, task: TaskHandle, router: ToolRouter) -> list[dict[str, str]]:
+        """Conversation seed for one episode (system prompt + user request)."""
+        return [
+            {"role": "system", "content": self.build_system_prompt(router)},
+            {"role": "user", "content": task.request},
+        ]
+
+    def initial_context(self, task: TaskHandle) -> tuple[ToolRouter, PolicyContext]:
+        """Build the episode's router and first PolicyContext without running it.
+
+        Used by warm-up and latency benchmarking; ``run`` uses the same code
+        path so benchmarked prompts are exactly the evaluated prompts.
+        """
+        router = self.build_router(task)
+        max_steps = max(1, int(task.max_steps))
+        context = PolicyContext(
+            request=task.request,
+            tools=[spec.to_dict() for spec in router.tool_specs()],
+            messages=self.initial_messages(task, router),
+            step=0,
+            remaining_steps=max_steps,
+        )
+        return router, context
+
     @staticmethod
     def _current_date(router: ToolRouter) -> str:
         for env in router.environments.values():
@@ -234,11 +261,10 @@ class Executor:
             initial_states=router.snapshots(),
             volatile_keys={f: sorted(k) for f, k in router.volatile_keys().items()},
         )
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": self.build_system_prompt(router)},
-            {"role": "user", "content": task.request},
-        ]
+        messages: list[dict[str, str]] = self.initial_messages(task, router)
         tool_specs = [spec.to_dict() for spec in router.tool_specs()]
+        result.system_prompt = messages[0]["content"]
+        result.tools = tool_specs
         seen_calls: dict[str, int] = {}
         max_steps = max(1, int(task.max_steps))
 

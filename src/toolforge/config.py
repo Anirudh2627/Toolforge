@@ -50,6 +50,53 @@ class LoggingSettings:
 
 
 @dataclass(frozen=True)
+class GenerationSettings:
+    """Sampling/generation defaults for model-backed policies."""
+
+    max_new_tokens: int = 512
+    do_sample: bool = False          # greedy by default; sampling for repeat-runs
+    temperature: float = 0.7         # used only when do_sample is True
+    top_p: float = 0.95              # used only when do_sample is True
+    sampling_seed: int | None = None # None -> derived from the run seed
+
+
+@dataclass(frozen=True)
+class ModelSettings:
+    """Model resolution for the default HF policy.
+
+    ``Qwen/Qwen3-0.6B`` is the pipeline-debugging default; the main experiment
+    uses a 1.7B-class model (``Qwen/Qwen3-1.7B``). Qwen3 requires
+    transformers>=4.51.0 (pinned in requirements-train.txt, Phase 3).
+    """
+
+    model_id: str = "Qwen/Qwen3-0.6B"
+    adapter_id: str | None = None
+    device: str = "auto"             # auto|cpu|cuda
+    dtype: str = "auto"              # auto|float16|bfloat16|float32
+    enable_thinking: bool = False    # Qwen3 hybrid thinking; off for tool calls
+
+
+@dataclass(frozen=True)
+class EvaluationSettings:
+    split: str = "test"
+    task_limit: int | None = None
+    repeat: int = 1
+    seed: int = 20260301
+    bootstrap_iterations: int = 10_000
+    include_states: bool = True
+    progress_every: int = 10
+    output_dir: str = "outputs/eval"
+    generation: GenerationSettings = field(default_factory=GenerationSettings)
+    model: ModelSettings = field(default_factory=ModelSettings)
+
+
+_NESTED_SECTIONS: dict[str, type] = {
+    "generation": GenerationSettings,
+    "model": ModelSettings,
+}
+
+
+@dataclass(frozen=True)
 class ToolForgeConfig:
     project: str = "toolforge"
     seed: int = 20260301
@@ -57,6 +104,7 @@ class ToolForgeConfig:
     env: EnvSettings = field(default_factory=EnvSettings)
     benchmark: BenchmarkSettings = field(default_factory=BenchmarkSettings)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
+    evaluation: EvaluationSettings = field(default_factory=EvaluationSettings)
 
 
 _SECTION_TYPES: dict[str, type] = {
@@ -64,6 +112,7 @@ _SECTION_TYPES: dict[str, type] = {
     "env": EnvSettings,
     "benchmark": BenchmarkSettings,
     "logging": LoggingSettings,
+    "evaluation": EvaluationSettings,
 }
 
 _TOP_LEVEL_SCALARS = {"project": str, "seed": int}
@@ -94,6 +143,8 @@ def _build_section(cls: type, raw: Mapping[str, Any], where: str) -> Any:
             if not isinstance(value, (list, tuple)) or not all(isinstance(v, str) for v in value):
                 raise ConfigError(f"{where}.held_out_families must be a list of strings, got {value!r}")
             value = tuple(value)
+        elif f.name in _NESTED_SECTIONS and isinstance(value, Mapping):
+            value = _build_section(_NESTED_SECTIONS[f.name], value, f"{where}.{f.name}")
         kwargs[f.name] = value
     return cls(**kwargs)
 
@@ -148,6 +199,13 @@ def load_config(path: str | Path | None = None, overrides: Mapping[str, Any] | N
         raise ConfigError("train_fraction must be in (0,1) and val_fraction in [0,1)")
     if bench.train_fraction + bench.val_fraction >= 1.0:
         raise ConfigError("train_fraction + val_fraction must be < 1.0 (remainder is test)")
+    evalsec: EvaluationSettings = sections["evaluation"]
+    if evalsec.split not in ("train", "val", "test", "all"):
+        raise ConfigError(f"evaluation.split must be train|val|test|all, got {evalsec.split!r}")
+    if evalsec.repeat < 1:
+        raise ConfigError("evaluation.repeat must be >= 1")
+    if evalsec.generation.max_new_tokens < 1:
+        raise ConfigError("evaluation.generation.max_new_tokens must be >= 1")
     return ToolForgeConfig(
         project=merged.get("project", "toolforge"),
         seed=merged.get("seed", 20260301),

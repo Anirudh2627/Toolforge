@@ -17,6 +17,18 @@ dependencies = ["PyYAML>=6.0,<7"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+# Model-backed evaluation/inference. Lower bounds only: Qwen3 support requires
+# transformers>=4.51.0. Mutually compatible PINNED versions (torch/transformers/
+# peft/trl/bitsandbytes) are finalized in Phase 3 (requirements-train.txt) after
+# checking against the actual Colab T4 stack — pinning blind would be guesswork.
+hf = [
+    "torch>=2.2",
+    "transformers>=4.51.0",
+    "peft>=0.15",
+    "accelerate>=0.30",
+]
+# Optional MCP adapter (core never imports it).
+mcp = ["mcp>=2.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,25 @@
+# ToolForge training stack — pinned set verified together in the project sandbox
+# on 2026-10-22 (import + API-shape probes + a 2-step Trainer run on a tiny model;
+# see scripts/check_train_env.py to re-verify on YOUR hardware before training).
+#
+# torch is intentionally NOT pinned exactly: Colab ships a CUDA build and
+# reinstalling it is slow and risky. Requirement: torch>=2.8 with CUDA 12.x on
+# the T4. Install the rest with:
+#   pip install -r requirements-train.txt
+#
+# transformers>=4.51 is mandatory for Qwen3 support; the code carries shims for
+# the 4.5x and 5.x argument renames (torch_dtype->dtype, evaluation_strategy->
+# eval_strategy). GRPO (Phase 4) uses trl's GRPOTrainer(model, reward_funcs,
+# args=GRPOConfig(...)) API verified present in trl 1.16.0.
+
+transformers==5.20.2
+tokenizers>=0.22
+peft==0.21.2
+accelerate==1.15.0
+trl==1.16.0
+datasets==5.1.0
+bitsandbytes==0.50.2 ; platform_system == "Linux"
+safetensors>=0.4.5
+numpy>=2.0
+sentencepiece>=0.2.0   # some Qwen tokenizer configs fall back to it
+einops>=0.8            # bitsandbytes dependency on some builds

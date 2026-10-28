@@ -1,0 +1,49 @@
+# ToolForge — Phase 2 configuration (evaluation)
+# Layered over built-in defaults by src/toolforge/config.py; unknown keys fail loudly.
+
+project: toolforge
+seed: 20260301
+
+paths:
+  data_dir: data
+  tasks_file: data/tasks/benchmark_v1.jsonl
+  output_dir: outputs
+  checkpoint_dir: outputs/checkpoints
+
+env:
+  default_max_steps: 8
+  repeat_limit: 3
+  sql_max_rows: 50
+  sql_progress_limit: 1000000
+
+benchmark:
+  seed: 20260301
+  version: v1
+  held_out_families: [crm]
+  train_fraction: 0.7
+  val_fraction: 0.1
+
+evaluation:
+  split: test              # train | val | test | all
+  task_limit: null         # e.g. 5 for a smoke run
+  repeat: 1                # >1 re-runs each task with different sampling seeds
+  seed: 20260301
+  bootstrap_iterations: 10000
+  include_states: true     # persist initial/final env states per task (reproducibility)
+  progress_every: 10
+  output_dir: outputs/eval
+  generation:
+    max_new_tokens: 512
+    do_sample: false       # greedy for headline numbers; sampling for repeat-runs
+    temperature: 0.7
+    top_p: 0.95
+    sampling_seed: null    # null -> derived from run seed + run_index
+  model:
+    model_id: Qwen/Qwen3-0.6B   # debug default; main experiment: Qwen/Qwen3-1.7B
+    adapter_id: null            # path to LoRA adapter dir (SFT or GRPO checkpoint)
+    device: auto                # auto|cpu|cuda
+    dtype: auto                 # auto: bf16 on Ampere+, fp16 on T4, fp32 on CPU
+    enable_thinking: false      # Qwen3 thinking mode off for tool-calling
+
+logging:
+  level: INFO

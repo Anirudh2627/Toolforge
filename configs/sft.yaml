@@ -1,0 +1,38 @@
+# ToolForge — SFT configuration (Phase 3)
+# Loaded by src/toolforge/sft.py: load_sft_settings(). Unknown keys fail loudly.
+# Defaults below are safe for a 15 GB T4 with a 0.6B–1.7B model at 1024 tokens.
+
+model_id: Qwen/Qwen3-0.6B        # debug default; main experiment: Qwen/Qwen3-1.7B
+train_file: data/sft/sft_train.jsonl
+val_file: data/sft/sft_val.jsonl
+output_dir: outputs/checkpoints/sft
+
+max_seq_len: 1024
+num_epochs: 3.0
+max_steps: -1                    # >0 overrides epochs (smoke tests use 2-10)
+per_device_batch_size: 1
+grad_accum_steps: 16             # effective batch = 16 at bs=1 (T4-safe)
+learning_rate: 2.0e-4
+warmup_steps: 20
+weight_decay: 0.0
+seed: 20260301
+
+logging_steps: 5
+eval_steps: 25
+save_steps: 25
+save_total_limit: 3
+
+use_4bit: false                  # true => QLoRA NF4 (requires CUDA + bitsandbytes)
+gradient_checkpointing: false    # true trades ~20% speed for large memory savings
+precision: auto                  # auto: bf16 on Ampere+, fp16 on T4, fp32 on CPU
+optim: adamw_torch               # with use_4bit consider paged_adamw_8bit
+device: auto
+resume: false
+trust_remote_code: false
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
