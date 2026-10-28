@@ -1,0 +1,35 @@
+# ToolForge — Phase 1 configuration
+# Loaded by src/toolforge/config.py. Unknown keys fail loudly (ConfigError)
+# so typos never silently change behavior.
+
+project: toolforge
+
+# Global seed recorded in experiment metadata and used for benchmark building.
+seed: 20260301
+
+paths:
+  data_dir: data
+  tasks_file: data/tasks/benchmark_v1.jsonl
+  output_dir: outputs
+  checkpoint_dir: outputs/checkpoints
+
+env:
+  # Maximum assistant turns per episode (tool calls AND invalid attempts).
+  default_max_steps: 8
+  # A fully identical (tool, arguments) call may repeat at most this many
+  # times per episode before the executor force-terminates (loop guard).
+  repeat_limit: 3
+  sql_max_rows: 50
+  sql_progress_limit: 1000000
+
+benchmark:
+  seed: 20260301
+  version: v1
+  # Entire tool families excluded from train/val; every task in these
+  # families lands in the test split (held-out generalization probe).
+  held_out_families: [crm]
+  train_fraction: 0.7
+  val_fraction: 0.1
+
+logging:
+  level: INFO

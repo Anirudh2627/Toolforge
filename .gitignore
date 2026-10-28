@@ -1,0 +1,39 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets — never commit
+.env
+
+# Experiment artifacts (reproducible via scripts; too large for git)
+outputs/
+runs/
+checkpoints/
+wandb/
+*.safetensors
+*.bin
+*.pt
+*.gguf
+
+# Generated benchmark (regenerate with scripts/generate_tasks.py)
+data/tasks/*.jsonl
+data/tasks/*.json
+!data/tasks/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Colab checkpoints
+.ipynb_checkpoints/
