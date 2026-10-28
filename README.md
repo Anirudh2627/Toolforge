@@ -13,12 +13,13 @@ task-completion accuracy of a small open model on tool-use tasks, including unse
 families, without an unacceptable increase in latency or inference cost?* The experiments
 will determine the answer; nothing is assumed.
 
-> **Status: Phases 1–3 complete** (foundation: environments, executor, verifier,
+> **Status: Phases 1–4 complete** (foundation: environments, executor, verifier,
 > benchmark; evaluation: inference policies, metrics with CIs, resumable runner,
 > latency/cost benchmarking, MCP adapter; training data: reference-solution
 > compiler, rejection-sampled rollouts, rewards, SFT serialization verified
-> against the real Qwen3 tokenizer, QLoRA training path). Phases 4–6 (GRPO,
-> ablations, Colab/demo) follow. **No results are reported anywhere in this
+> against the real Qwen3 tokenizer, QLoRA training path; RL: custom GRPO with
+> verifier-backed group-relative advantages, tested end-to-end). Phases 5–6
+> (ablations, Colab/demo) follow. **No results are reported anywhere in this
 > repository until real runs exist.**
 
 ---
@@ -67,6 +68,7 @@ ToolForge/
 │   ├── data_generation.py       # reference + rollout collection, rejection sampling, SFT mixing
 │   ├── sft_data.py              # messages -> masked token ids (assistant-only loss), collator data
 │   ├── sft.py                   # QLoRA/LoRA training on the masked data (transformers 4.5x/5.x shims)
+│   ├── grpo.py                  # custom GRPO: executor rollouts, group advantages, clipped surrogate
 │   ├── checkpointing.py         # fingerprints, atomic metadata, resume discovery, adapter merge/export
 │   ├── mcp_adapter.py           # OPTIONAL MCP server over the same envs (core never imports it)
 │   └── environments/            # base.py, calendar.py, email.py, files.py, crm.py, sql.py,
@@ -77,12 +79,14 @@ ToolForge/
 ├── scripts/generate_trajectories.py  # reference solutions + rejection-sampled rollouts
 ├── scripts/prepare_sft_data.py  # trajectories -> messages-level SFT JSONL (mix + hygiene)
 ├── scripts/train_sft.py         # QLoRA/LoRA training (--smoke for a 2-step stack check)
+├── scripts/train_grpo.py        # GRPO on top of an SFT checkpoint (--smoke, --resume)
 ├── scripts/export_model.py      # merge adapter into base weights (licensing noted)
 ├── scripts/check_train_env.py   # compatibility probe: run on the training machine first
 ├── scripts/validate_qwen3_serialization.py  # masking validation on the real tokenizer
 ├── configs/sft.yaml             # SFT settings (strict validation)
+├── configs/grpo.yaml            # GRPO settings incl. reward components (strict validation)
 ├── requirements-train.txt       # pinned training stack (verified together, see file)
-├── tests/                       # 393 CPU-only tests (no model downloads; torch tests skip if absent)
+├── tests/                       # 416 CPU-only tests (no model downloads; torch tests skip if absent)
 ├── data/tasks/                  # generated benchmark (JSONL + summary)
 ├── data/trajectories/           # collected trajectories + stats (generated)
 ├── data/sft/                    # tokenizer-free SFT records (generated)
@@ -398,6 +402,73 @@ enforced at startup, not hoped for. Every component is returned for logging.
 Adversarial cases are unit-tested (lying final answers earn 0; repeated no-ops
 can never accumulate reward).
 
+## GRPO reinforcement learning (Phase 4)
+
+### Implementation decision (evidence-based, per spec §9)
+
+TRL's `GRPOTrainer` (probed on the pinned trl==1.16.0) dispatches tools through
+**OpenAI-style native `tool_calls`** parsed by the chat-template harness
+(`_tool_call_loop` → `name(**arguments)` on stateless functions). ToolForge's
+grammar is a single JSON action object inside message *content*
+(`tool_call`/`clarify`/`final_answer`), and rewards require isolated per-rollout
+environment execution plus final-state verification — TRL's loop would never
+detect our actions, and its `reward_funcs(prompts, completions)` protocol cannot
+see environment state. Adopting it would force the whole project onto
+template-native tool calls, breaking the one-grammar contract across benchmark,
+SFT, and evaluation. **Therefore GRPO is implemented directly**
+(`src/toolforge/grpo.py`, DeepSeekMath formulation) — not a renamed SFT loop:
+
+1. Sample `G` episodes per task from the current policy **through the same
+   executor used for evaluation** (environments/verifier on CPU, GPU only
+   generates/trains).
+2. Reward each episode with the verifier-backed reward (`rewards.py`) — actual
+   final state, never textual claims.
+3. Group-relative advantages `A_g = (r_g − mean)/ (std + ε)`; zero-variance
+   groups are skipped (logged), never faked.
+4. Token-level clipped surrogate (`clip_eps=0.2`) over **assistant tokens only**
+   (identical masking to SFT), `ppo_epochs` passes per rollout batch, optional
+   KL (k3 estimator) against the **adapter-disabled base model** — no second
+   model in memory.
+5. Linear LR warmup then constant; AdamW; gradient clipping.
+
+### Integrity features (all tested)
+
+- **Independent validation**: every `eval_every` iterations the current policy
+  is evaluated greedily on a fixed val-split subset through the standard
+  verifier — training reward and validated accuracy are logged side by side in
+  `history.jsonl`.
+- **Divergence detector**: when mean training reward rises while validated
+  success falls by more than `divergence_threshold`, a `DIVERGENCE WARNING` is
+  logged and flagged in history — the spec's "reward improves but accuracy
+  does not" case.
+- Frozen base weights asserted in tests; zero-advantage groups produce
+  exactly zero parameter movement; `policy_error` episodes are excluded from
+  gradients; step-limit/loop-guard episodes train on the tokens up to the
+  policy's last action (trailing tool observation trimmed).
+- Resumable at iteration boundaries (adapter + optimizer + RNG + history),
+  because Colab sessions die; checkpoints pruned to `save_total_limit`.
+- Split hygiene: `GrpoSettings.validate()` refuses `split="test"`.
+
+### Commands
+
+```bash
+python scripts/check_train_env.py                  # includes the TRL GRPO API probe
+python scripts/train_grpo.py --config configs/grpo.yaml --smoke \
+    --adapter-id outputs/checkpoints/sft/adapter-final --compact-catalog
+python scripts/train_grpo.py --config configs/grpo.yaml \
+    --adapter-id outputs/checkpoints/sft/adapter-final --compact-catalog
+python scripts/train_grpo.py ... --resume          # after a session drop
+# Independent evaluation of the result (Phase 5 compares all three checkpoints):
+python scripts/evaluate.py --policy hf --model-id Qwen/Qwen3-0.6B \
+    --adapter-id outputs/checkpoints/grpo/checkpoint-iter00059 --split test --compact-catalog
+```
+
+Budget note (measured mechanics, not invented speed): each iteration runs
+`rollout_batch_size × num_generations` multi-turn episodes; on a T4 this is
+generation-bound. Defaults (60 iterations × 2 tasks × 6 rollouts) are sized for
+0.6B on a T4; watch `history.jsonl` `seconds` per iteration and scale
+`total_iterations` to your session budget — resume makes long runs safe.
+
 ## Results
 
 | Model | Overall success | Seen families | Held-out (crm) | Invalid-call rate | Latency/task |
@@ -417,8 +488,10 @@ No cell in this table will be filled from anything other than saved evaluation r
   assistant-only masking validated on the real Qwen3 template, compact catalog,
   QLoRA/LoRA training path tested end-to-end on a tiny model, pinned+probed
   training stack).
-- **Phase 4** — GRPO on top of the SFT policy using the verifier-backed reward
-  (TRL 1.16 `GRPOTrainer(reward_funcs=...)` API already probed green).
+- **Phase 4 — done** (custom GRPO with executor-grounded rollouts, verifier
+  rewards, group-relative advantages, clipped surrogate, adapter-disabled KL
+  reference, independent val evaluation + divergence detector, resumable
+  checkpoints; TRL incompatibility documented with evidence).
 - **Phase 5** — ablations, plots from real evaluation files only, `compare_models.py`.
 - **Phase 6** — Colab notebook, Streamlit demo, full report.
 
@@ -488,6 +561,22 @@ stack rather than guessed here.
   without re-training (Phase 5 enforces fingerprint checks).
 - At `max_seq_len=1536`, ~16% of reference samples (long SQL/evidence chains) are still
   dropped; the count is reported in every run's metadata rather than hidden.
+
+### Phase 4 (GRPO)
+
+- **Custom implementation, deliberately**: TRL 1.16's GRPO cannot host the ToolForge
+  grammar/verifier loop (evidence in the section above and in `grpo.py`'s module
+  docstring). If you prefer the TRL-native path, that is a project-wide grammar change —
+  an explicit decision, not a silent one.
+- **No real-model GRPO run happened in this workspace** (no GPU): the full loop
+  (rollouts → verifier rewards → advantages → clipped updates → eval → checkpoint →
+  resume) is tested on a tiny random-weight PEFT model with deterministic scripted
+  policies. The first real run is `train_grpo.py --smoke` on your GPU.
+- Rollout cost scales as `iterations × tasks × G × turns × generation`; defaults are
+  sized for a T4 + 0.6B. `history.jsonl` records per-iteration seconds so you can
+  project the budget after the first iterations and stop/resume freely.
+- GRPO does not use vLLM-style batched generation (single-sequence `model.generate`);
+  throughput is adequate at 0.6B but this is the first thing to optimize if needed.
 
 ## License
 

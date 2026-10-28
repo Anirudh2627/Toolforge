@@ -1,0 +1,72 @@
+# ToolForge — GRPO configuration (Phase 4)
+# Loaded by src/toolforge/grpo.py: load_grpo_settings(). Unknown keys fail loudly.
+# Defaults target a 15 GB T4 with Qwen3-0.6B (LoRA fp16) — see README for the
+# measured-cost discussion before scaling up total_iterations.
+
+model_id: Qwen/Qwen3-0.6B
+adapter_id: null                 # REQUIRED in practice: path to the SFT adapter
+output_dir: outputs/checkpoints/grpo
+tasks_file: data/tasks/benchmark_v1.jsonl
+split: train                     # test split is refused by validation
+task_limit: null
+
+# --- rollouts (GPU generates; environments/verifier run on CPU) ---
+num_generations: 6               # G: episodes sampled per task (group size)
+rollout_batch_size: 2            # tasks per GRPO iteration
+max_new_tokens: 256              # per turn — actions are short JSON
+temperature: 1.0
+top_p: 0.95
+max_seq_len: 1536                # episodes longer than this are dropped (counted)
+
+# --- objective (GRPO, DeepSeekMath formulation) ---
+ppo_epochs: 1                    # optimization passes per rollout batch
+clip_eps: 0.2
+beta_kl: 0.02                    # KL to adapter-disabled reference; 0 disables
+scale_rewards: true              # divide group advantages by std
+skip_zero_variance: true         # all-equal-reward groups give no gradient
+
+# --- optimization ---
+learning_rate: 5.0e-6            # RL-scale LR (SFT used 2e-4)
+weight_decay: 0.0
+max_grad_norm: 1.0
+warmup_steps: 10
+total_iterations: 60
+gradient_checkpointing: false
+
+# --- evaluation / checkpoints (Colab sessions die; resume is first-class) ---
+eval_every: 5                    # independent verifier-based eval on val split
+eval_split: val
+eval_task_limit: 12
+save_every: 5
+save_total_limit: 3
+log_every: 1
+divergence_threshold: 0.05       # reward-up/accuracy-down warning trigger
+
+# --- system ---
+seed: 20260301
+device: auto
+dtype: auto                      # T4 -> fp16, Ampere+ -> bf16
+use_4bit: false                  # QLoRA+GRPO is experimental; keep LoRA fp16 on T4
+enable_thinking: false
+compact_catalog: false           # MUST match the SFT checkpoint's catalog rendering
+trust_remote_code: false
+resume: false
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05                  # 0.0 is common for RL; 0.05 keeps parity with SFT
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  bias: none
+
+# Reward components (validated for dominance at startup):
+reward:
+  success_reward: 1.0
+  failure_reward: 0.0
+  invalid_call_penalty: -0.02
+  tool_call_penalty: -0.005
+  step_limit_penalty: -0.1
+  loop_guard_penalty: -0.1
+  wrong_clarification_penalty: -0.1
+  policy_error_penalty: -0.2
+  format_bonus: 0.0              # stays OFF: verified success is the only signal
