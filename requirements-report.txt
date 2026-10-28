@@ -1,0 +1,3 @@
+# Reporting/plotting dependencies (Phase 5). Colab has matplotlib preinstalled.
+-r requirements.txt
+matplotlib>=3.8

@@ -29,6 +29,8 @@ hf = [
 ]
 # Optional MCP adapter (core never imports it).
 mcp = ["mcp>=2.0"]
+# Ablation plots and reports (Phase 5).
+report = ["matplotlib>=3.8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

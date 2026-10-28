@@ -59,7 +59,12 @@ def wilson_ci(successes: int, n: int, z: float = Z_95) -> tuple[float, float] | 
     denom = 1 + z * z / n
     center = (p + z * z / (2 * n)) / denom
     spread = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
-    return (max(0.0, center - spread), min(1.0, center + spread))
+    lo, hi = center - spread, center + spread
+    # Snap float epsilon to the exact bounds (p=0 -> lo=0, p=1 -> hi=1) so
+    # downstream consumers (e.g. matplotlib error bars) never see -1e-17.
+    lo = 0.0 if lo < 1e-12 else lo
+    hi = 1.0 if hi > 1 - 1e-12 else hi
+    return (max(0.0, lo), min(1.0, hi))
 
 
 def bootstrap_ci(values: Sequence[float], *, seed: int = 0, iterations: int = 10_000,

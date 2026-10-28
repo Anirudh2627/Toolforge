@@ -13,14 +13,11 @@ task-completion accuracy of a small open model on tool-use tasks, including unse
 families, without an unacceptable increase in latency or inference cost?* The experiments
 will determine the answer; nothing is assumed.
 
-> **Status: Phases 1–4 complete** (foundation: environments, executor, verifier,
-> benchmark; evaluation: inference policies, metrics with CIs, resumable runner,
-> latency/cost benchmarking, MCP adapter; training data: reference-solution
-> compiler, rejection-sampled rollouts, rewards, SFT serialization verified
-> against the real Qwen3 tokenizer, QLoRA training path; RL: custom GRPO with
-> verifier-backed group-relative advantages, tested end-to-end). Phases 5–6
-> (ablations, Colab/demo) follow. **No results are reported anywhere in this
-> repository until real runs exist.**
+> **Status: Phases 1–5 complete** (foundation; evaluation harness; training
+> data + QLoRA SFT; custom GRPO with verifier-backed rewards; ablation
+> comparison + plots + honest reporting). Phase 6 (Colab notebook, demo,
+> final docs) follows. **No results are reported anywhere in this repository
+> until real runs exist.**
 
 ---
 
@@ -69,6 +66,8 @@ ToolForge/
 │   ├── sft_data.py              # messages -> masked token ids (assistant-only loss), collator data
 │   ├── sft.py                   # QLoRA/LoRA training on the masked data (transformers 4.5x/5.x shims)
 │   ├── grpo.py                  # custom GRPO: executor rollouts, group advantages, clipped surrogate
+│   ├── comparison.py            # run loading + integrity, compatibility checks, paired/McNemar, report
+│   ├── plots.py                 # ablation figures from loaded artifacts only (never fabricated)
 │   ├── checkpointing.py         # fingerprints, atomic metadata, resume discovery, adapter merge/export
 │   ├── mcp_adapter.py           # OPTIONAL MCP server over the same envs (core never imports it)
 │   └── environments/            # base.py, calendar.py, email.py, files.py, crm.py, sql.py,
@@ -80,13 +79,15 @@ ToolForge/
 ├── scripts/prepare_sft_data.py  # trajectories -> messages-level SFT JSONL (mix + hygiene)
 ├── scripts/train_sft.py         # QLoRA/LoRA training (--smoke for a 2-step stack check)
 ├── scripts/train_grpo.py        # GRPO on top of an SFT checkpoint (--smoke, --resume)
+├── scripts/compare_models.py    # ablations: tables, paired analysis, plots, REPORT.md
 ├── scripts/export_model.py      # merge adapter into base weights (licensing noted)
 ├── scripts/check_train_env.py   # compatibility probe: run on the training machine first
 ├── scripts/validate_qwen3_serialization.py  # masking validation on the real tokenizer
 ├── configs/sft.yaml             # SFT settings (strict validation)
 ├── configs/grpo.yaml            # GRPO settings incl. reward components (strict validation)
 ├── requirements-train.txt       # pinned training stack (verified together, see file)
-├── tests/                       # 416 CPU-only tests (no model downloads; torch tests skip if absent)
+├── requirements-report.txt      # matplotlib for ablation figures
+├── tests/                       # 440 CPU-only tests (no model downloads; torch tests skip if absent)
 ├── data/tasks/                  # generated benchmark (JSONL + summary)
 ├── data/trajectories/           # collected trajectories + stats (generated)
 ├── data/sft/                    # tokenizer-free SFT records (generated)
@@ -469,6 +470,48 @@ generation-bound. Defaults (60 iterations × 2 tasks × 6 rollouts) are sized fo
 0.6B on a T4; watch `history.jsonl` `seconds` per iteration and scale
 `total_iterations` to your session budget — resume makes long runs safe.
 
+## Ablations & reporting (Phase 5)
+
+```bash
+# The standard three-way ablation (base vs SFT vs SFT+GRPO evaluation runs):
+python scripts/compare_models.py \
+    --run base=outputs/eval/base-0.6b \
+    --run sft=outputs/eval/sft-0.6b \
+    --run sft-grpo=outputs/eval/grpo-0.6b \
+    --history sft-grpo=outputs/checkpoints/grpo/history.jsonl \
+    --out reports/ablations
+
+# Data-amount ablation: SFT trained on different trajectory subsets, compared
+# the same way (--run sft-25=... --run sft-50=...); each run's metadata records
+# its training-sample count.
+# Repeated-training variability (independently trained runs, one config):
+python scripts/compare_models.py ... --group sft=eval/sft-seed1,eval/sft-seed2
+# Documentation-only preview with loud fake-data watermarking:
+python scripts/compare_models.py --illustrative --out /tmp/preview
+```
+
+Outputs: `REPORT.md` (every number read from the supplied artifacts),
+`comparison.json/csv`, `paired.json`, `provenance.json` (input paths + SHA-256
+prefixes), and five+ figures: overall success with Wilson-95% bars, success by
+category, seen vs held-out family, invalid/side-effect rates, latency-vs-success
+scatter, and — when GRPO histories are supplied — **training reward vs
+independently validated accuracy** with divergence warnings marked.
+
+Hard integrity guarantees (tested):
+
+- `metrics.json` is **re-verified against `predictions.jsonl`** on load; edited
+  aggregates are refused ("tampered or stale").
+- Runs must share grammar version, tool-catalog fingerprints, and split, or the
+  comparison fails; `--allow-incompatible` records every violation in the report.
+- Paired analysis on the task intersection with an **exact McNemar test**
+  (pure-python binomial, no scipy); reports both/neither/only-A/only-B.
+- CI vocabulary is explicit: per-run Wilson/bootstrap-over-tasks vs
+  repeated-training std (only with `--group`), never conflated.
+- Missing data → `PlotDataError`, never a padded figure. `--illustrative` mode
+  is watermarked, filename-prefixed, and refuses to look like a result.
+- Overlapping CIs are reported as "not statistically distinguishable" — the
+  report does not claim wins the data does not support.
+
 ## Results
 
 | Model | Overall success | Seen families | Held-out (crm) | Invalid-call rate | Latency/task |
@@ -492,8 +535,11 @@ No cell in this table will be filled from anything other than saved evaluation r
   rewards, group-relative advantages, clipped surrogate, adapter-disabled KL
   reference, independent val evaluation + divergence detector, resumable
   checkpoints; TRL incompatibility documented with evidence).
-- **Phase 5** — ablations, plots from real evaluation files only, `compare_models.py`.
-- **Phase 6** — Colab notebook, Streamlit demo, full report.
+- **Phase 5 — done** (comparison harness with artifact-integrity and
+  compatibility hard-checks, paired McNemar analysis, repeat-group training
+  variability, publication-style plots from real files only, auto-generated
+  honest REPORT.md, watermarked illustrative mode).
+- **Phase 6** — Colab notebook, Streamlit demo, final documentation pass.
 
 ## Installation extras
 
@@ -577,6 +623,15 @@ stack rather than guessed here.
   project the budget after the first iterations and stop/resume freely.
 - GRPO does not use vLLM-style batched generation (single-sequence `model.generate`);
   throughput is adequate at 0.6B but this is the first thing to optimize if needed.
+
+### Phase 5 (ablations & reporting)
+
+- Plots need `matplotlib` (`requirements-report.txt`); everything else is stdlib.
+- `REPORT.md` "Next experiments" guidance is intentionally NOT auto-generated prose —
+  the report lists regressions/failure modes/limitations from data and leaves
+  interpretation to the author; auto-generated causal claims would be fabrication risk.
+- McNemar is exact-binomial (conservative at small n); with ~59 test tasks, only large
+  paired differences will reach significance — stated plainly in the report's limitations.
 
 ## License
 
