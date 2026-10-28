@@ -7,7 +7,10 @@ train_file: data/sft/sft_train.jsonl
 val_file: data/sft/sft_val.jsonl
 output_dir: outputs/checkpoints/sft
 
-max_seq_len: 1024
+max_seq_len: 1536                # measured on reference data with the compact
+                                 # catalog (Qwen3 tokenizer): median ~790 tokens,
+                                 # 16% of samples >1536 (dropped, counted in stats),
+                                 # 35% >1024. Use 1024 only under memory pressure.
 num_epochs: 3.0
 max_steps: -1                    # >0 overrides epochs (smoke tests use 2-10)
 per_device_batch_size: 1
@@ -29,6 +32,12 @@ optim: adamw_torch               # with use_4bit consider paged_adamw_8bit
 device: auto
 resume: false
 trust_remote_code: false
+
+# Passed to apply_chat_template during tokenization; MUST match the inference
+# side (HuggingFacePolicy uses the same default) so training and evaluation see
+# byte-identical serialization. Qwen3: thinking mode off for tool calling.
+chat_template_kwargs:
+  enable_thinking: false
 
 lora:
   r: 16

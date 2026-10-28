@@ -74,8 +74,9 @@ def main() -> int:
 
     @probe("transformers Qwen3 architecture present")
     def _qwen3():
-        import transformers.models  # noqa: F401
-        from transformers.models import qwen3  # noqa: F401
+        import transformers.models as _models  # probe
+        from transformers.models import qwen3  # probe
+        assert _models and qwen3
         return "qwen3 module ok"
 
     @probe("TrainingArguments uses eval_strategy/evaluation_strategy consistently")
@@ -94,7 +95,8 @@ def main() -> int:
     @probe("peft LoraConfig + TaskType")
     def _peft():
         import peft
-        from peft import LoraConfig, TaskType, get_peft_model  # noqa: F401
+        from peft import LoraConfig, TaskType, get_peft_model  # probe
+        assert LoraConfig and TaskType and get_peft_model
         return peft.__version__
 
     @probe("bitsandbytes 4-bit (needs CUDA; FAIL on CPU is expected)")

@@ -280,3 +280,34 @@ def test_policy_id_never_contains_secret(monkeypatch):
     policy = OpenAICompatiblePolicy("m", api_key_env="TOOLFORGE_TEST_KEY")
     assert "SUPERSECRET" not in policy.policy_id
     assert policy.policy_id == "api:m@https://api.openai.com/v1"
+
+
+class TestCompactCatalogRendering:
+    def test_hf_policy_compact_flag_matches_training_rendering(self, executor,
+                                                               small_calendar_fixture):
+        """The inference-side compaction must equal the training-side one."""
+        from test_data_generation import make_task_with_fixture
+        from toolforge.data_generation import compact_system_prompt
+
+        task = make_task_with_fixture(small_calendar_fixture)
+        router, ctx = executor.initial_context(task)
+
+        outputs = []
+
+        def fake_generate(prompt, kwargs):
+            outputs.append(prompt)
+            return "{}", 1, 1
+
+        full_policy = HuggingFacePolicy("fake/model", tokenizer=FakeTokenizer(),
+                                        generate_fn=fake_generate)
+        compact_policy = HuggingFacePolicy("fake/model", tokenizer=FakeTokenizer(),
+                                           generate_fn=fake_generate, compact_catalog=True)
+        full_policy(ctx)
+        compact_policy(ctx)
+        full_prompt, compact_prompt = outputs
+
+        assert '"parameters"' in full_prompt and "- calendar.create_event(" not in full_prompt
+        assert "- calendar.create_event(" in compact_prompt and '"parameters"' not in compact_prompt
+        # Identical to what prepare_sft_data produces for training records.
+        expected = compact_system_prompt(ctx.messages[0]["content"], ctx.tools)
+        assert expected in compact_prompt

@@ -25,9 +25,11 @@ wandb/
 *.pt
 *.gguf
 
-# Generated benchmark (regenerate with scripts/generate_tasks.py)
+# Generated benchmark and datasets (regenerate with scripts/)
 data/tasks/*.jsonl
 data/tasks/*.json
+data/trajectories/
+data/sft/
 !data/tasks/.gitkeep
 
 # OS / editor

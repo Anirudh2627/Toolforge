@@ -74,6 +74,7 @@ class ModelSettings:
     device: str = "auto"             # auto|cpu|cuda
     dtype: str = "auto"              # auto|float16|bfloat16|float32
     enable_thinking: bool = False    # Qwen3 hybrid thinking; off for tool calls
+    compact_catalog: bool = False    # must match the checkpoint's training serialization
 
 
 @dataclass(frozen=True)

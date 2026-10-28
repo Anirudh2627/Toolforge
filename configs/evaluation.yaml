@@ -44,6 +44,8 @@ evaluation:
     device: auto                # auto|cpu|cuda
     dtype: auto                 # auto: bf16 on Ampere+, fp16 on T4, fp32 on CPU
     enable_thinking: false      # Qwen3 thinking mode off for tool-calling
+    compact_catalog: false      # true for checkpoints trained on compacted catalogs
+                                # (prepare_sft_data.py --catalog compact, the default)
 
 logging:
   level: INFO

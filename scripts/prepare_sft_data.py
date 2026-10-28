@@ -45,6 +45,10 @@ def main() -> int:
                    help="trajectory JSONL files, in priority order (earlier = kept first)")
     p.add_argument("--out-dir", default="data/sft")
     p.add_argument("--max-per-task", type=int, default=None)
+    p.add_argument("--catalog", choices=["compact", "full"], default="compact",
+                   help="System-prompt tool catalog rendering for training records. "
+                        "'compact' (~3x shorter, same information) must be matched at "
+                        "inference time via evaluate.py --compact-catalog.")
     p.add_argument("--allow-dirty", action="store_true",
                    help="also keep trajectories containing invalid calls (default: clean only)")
     args = p.parse_args()
@@ -56,6 +60,10 @@ def main() -> int:
         reference, *others,
         held_out_families=config.benchmark.held_out_families,
         max_per_task=args.max_per_task)
+
+    if args.catalog == "compact":
+        from toolforge.data_generation import compact_trajectory_messages
+        pool = [compact_trajectory_messages(t) for t in pool]
 
     records, filter_stats = build_sft_records(
         pool, require_verified=True, require_clean=not args.allow_dirty)
@@ -73,6 +81,7 @@ def main() -> int:
     stats = {
         "mix": mix_stats,
         "record_filter": filter_stats,
+        "catalog_rendering": args.catalog,
         "train_records": len(train_records),
         "val_records": len(val_records),
         "by_category": dict(Counter(r["category"] for r in train_records)),

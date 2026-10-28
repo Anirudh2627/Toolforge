@@ -1,11 +1,11 @@
 """Tests for SFT serialization: assistant-only loss masks, truncation policy,
 record filtering. Uses a deterministic whitespace tokenizer with a ChatML-like
-template, so masks can be asserted token-exactly without model downloads.
+template (offset-mapping capable), so masks can be asserted token-exactly
+without model downloads. A Qwen3-style artifact template proves the masking
+tolerates position-dependent rendering.
 """
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
@@ -20,53 +20,111 @@ from toolforge.sft_data import (
     trajectory_to_sft_record,
 )
 
-SPECIALS = ["<|pad|>", "<|im_start|>", "<|im_end|>", "<|unk|>"]
+PAD, IM_START, IM_END, UNK = "<|pad|>", "<|im_start|>", "<|im_end|>", "<|unk|>"
+SPECIALS = [PAD, IM_START, IM_END, UNK]
 ROLES = ["system", "user", "assistant", "tool"]
 
 
 class TinyTokenizer:
-    """Whitespace tokenizer with a ChatML-like template (prefix-stable)."""
+    """Whitespace tokenizer with a ChatML-like, anchor-stable template and
+    offset-mapping support (like every fast HF tokenizer)."""
 
-    def __init__(self, extra_words=()):
+    def __init__(self, extra_words=(), support_offsets: bool = True):
         self.vocab = {w: i for i, w in enumerate(SPECIALS + ROLES)}
         for word in extra_words:
             self._add(word)
+        self.support_offsets = support_offsets
+        self.additional_special_tokens = [IM_START, IM_END]
         self.pad_token_id = 0
-        self.eos_token_id = self.vocab["<|im_end|>"]
-        self.pad_token = "<|pad|>"
-        self.eos_token = "<|im_end|>"
+        self.eos_token_id = self.vocab[IM_END]
+        self.pad_token = PAD
+        self.eos_token = IM_END
 
     def _add(self, word: str) -> None:
         if word not in self.vocab:
             self.vocab[word] = len(self.vocab)
 
     def _ids(self, text: str) -> list[int]:
-        unk = self.vocab["<|unk|>"]
+        unk = self.vocab[UNK]
         return [self.vocab.get(w, unk) for w in text.split()]
 
-    def __call__(self, text, add_special_tokens=False, return_tensors=None):
-        return {"input_ids": self._ids(text)}
+    def __call__(self, text, add_special_tokens=False, return_tensors=None,
+                 return_offsets_mapping=False):
+        ids, offsets = [], []
+        pos = 0
+        for word in text.split():
+            start = text.find(word, pos)
+            end = start + len(word)
+            ids.append(self.vocab.get(word, self.vocab[UNK]))
+            offsets.append((start, end))
+            pos = end
+        out = {"input_ids": ids}
+        if return_offsets_mapping and self.support_offsets:
+            out["offset_mapping"] = offsets
+        return out
 
     def encode(self, text, add_special_tokens=False):
         return self._ids(text)
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False,
                             chat_template_kwargs=None):
-        parts = [f"<|im_start|> {m['role']} {m['content']} <|im_end|>" for m in messages]
+        parts = [f"{IM_START} {m['role']} {m['content']} {IM_END}" for m in messages]
         text = " ".join(parts)
         if add_generation_prompt:
-            text += " <|im_start|> assistant"
+            text += f" {IM_START} assistant"
         return text
+
+    # convenience for tests
+    def supervised_text(self, out: dict) -> str:
+        return " ".join(self._word(i) for i, l in zip(out["input_ids"], out["labels"])
+                        if l != IGNORE_INDEX)
+
+    def _word(self, token_id: int) -> str:
+        for w, i in self.vocab.items():
+            if i == token_id:
+                return w
+        return UNK
+
+
+class NoOffsetTokenizer(TinyTokenizer):
+    """Lacks offset_mapping -> exercises the strict prefix-diff fallback."""
+
+    def __init__(self, extra_words=()):
+        super().__init__(extra_words, support_offsets=False)
 
 
 class BrokenTemplateTokenizer(TinyTokenizer):
-    """Violates the generation-prompt prefix property on purpose."""
+    """Violates the anchor property (different header in generation prompts);
+    with offsets unavailable the fallback must refuse to mask."""
+
+    def __init__(self, extra_words=()):
+        super().__init__(extra_words, support_offsets=False)
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False,
                             chat_template_kwargs=None):
         text = super().apply_chat_template(messages, tokenize, False, chat_template_kwargs)
         if add_generation_prompt:
-            text += " ASSISTANT-DIFFERENT-MARKER"
+            text += " BROKENHEADER assistant"
+        return text
+
+
+class ArtifactTemplateTokenizer(TinyTokenizer):
+    """Mimics Qwen3: injects an ARTIFACT marker before the LAST assistant
+    message's content when rendering the full conversation (position-dependent
+    rendering). Supervised spans must exclude the artifact."""
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False,
+                            chat_template_kwargs=None):
+        parts = []
+        last = len(messages) - 1
+        for i, m in enumerate(messages):
+            content = m["content"]
+            if m["role"] == "assistant" and i == last and not add_generation_prompt:
+                content = "ARTIFACT " + content
+            parts.append(f"{IM_START} {m['role']} {content} {IM_END}")
+        text = " ".join(parts)
+        if add_generation_prompt:
+            text += f" {IM_START} assistant"
         return text
 
 
@@ -78,59 +136,81 @@ SAMPLE_MESSAGES = [
     {"role": "assistant", "content": "done created the event"},
 ]
 
+ALL_WORDS = ("you are toolforge create event sync tomorrow calling calendar now "
+             "ok true created done the").split()
+
 
 def expected_supervised_words(tokenizer: TinyTokenizer) -> list[int]:
+    """content words + end-of-turn per assistant message."""
     ids = []
     for m in SAMPLE_MESSAGES:
         if m["role"] == "assistant":
             ids.extend(tokenizer._ids(m["content"]))
-            ids.append(tokenizer.vocab["<|im_end|>"])  # end-of-turn must be supervised
+            ids.append(tokenizer.vocab[IM_END])
     return ids
 
 
 class TestMasking:
     def test_labels_cover_exactly_assistant_spans(self):
-        tok = TinyTokenizer(extra_words="you are toolforge create event sync tomorrow "
-                                        "calling calendar now ok true created done the".split())
+        tok = TinyTokenizer(extra_words=ALL_WORDS)
         out = tokenize_sft_messages(SAMPLE_MESSAGES, tok)
         supervised = [i for i, l in zip(out["input_ids"], out["labels"]) if l != IGNORE_INDEX]
         assert supervised == expected_supervised_words(tok)
-        # supervised labels equal the input tokens at those positions
         assert all(i == l for i, l in zip(out["input_ids"], out["labels"]) if l != IGNORE_INDEX)
 
     def test_non_assistant_tokens_are_masked(self):
-        # Full vocab so no word collides with <unk> inside supervised spans.
-        tok = TinyTokenizer(extra_words=(
-            "you are toolforge create event sync tomorrow calling calendar now "
-            "ok true created done the").split())
+        tok = TinyTokenizer(extra_words=ALL_WORDS)
         out = tokenize_sft_messages(SAMPLE_MESSAGES, tok)
-        masked_positions = sum(1 for l in out["labels"] if l == IGNORE_INDEX)
-        assert masked_positions > 0
-        # system/user/tool words appear only in masked positions
-        for word in ("toolforge", "tomorrow", "true"):
-            wid = tok.vocab.get(word, tok.vocab["<|unk|>"])
+        for word in ("toolforge", "tomorrow", "true", IM_START):
+            wid = tok.vocab[word]
             positions = [k for k, i in enumerate(out["input_ids"]) if i == wid]
+            assert positions, word
             assert all(out["labels"][k] == IGNORE_INDEX for k in positions), word
 
-    def test_input_length_matches_rendered_conversation(self):
+    def test_input_is_full_render(self):
         tok = TinyTokenizer()
         out = tokenize_sft_messages(SAMPLE_MESSAGES, tok)
-        rendered = tok.apply_chat_template(SAMPLE_MESSAGES, tokenize=False)
+        rendered = tok.apply_chat_template(SAMPLE_MESSAGES, tokenize=False,
+                                           add_generation_prompt=False)
         assert len(out["input_ids"]) == len(rendered.split())
         assert out["attention_mask"] == [1] * len(out["input_ids"])
+        assert sum(1 for l in out["labels"] if l != IGNORE_INDEX) < len(out["labels"])
 
     def test_end_of_turn_token_supervised(self):
-        tok = TinyTokenizer()
+        tok = TinyTokenizer(extra_words=ALL_WORDS)
         out = tokenize_sft_messages(SAMPLE_MESSAGES, tok)
-        eot = tok.vocab["<|im_end|>"]
-        # last token of the sequence is the final assistant turn's end-of-turn
-        assert out["input_ids"][-1] == eot
-        assert out["labels"][-1] == eot
+        eot = tok.vocab[IM_END]
+        spans, current, prev = [], [], None
+        for i, l in enumerate(out["labels"]):
+            if l != IGNORE_INDEX:
+                if prev is not None and i != prev + 1:
+                    spans.append(current)
+                    current = []
+                current.append(l)
+                prev = i
+        if current:
+            spans.append(current)
+        assert len(spans) == 2
+        assert all(span[-1] == eot for span in spans)
 
-    def test_broken_template_raises(self):
-        tok = BrokenTemplateTokenizer()
+    def test_qwen_style_artifact_excluded_from_supervision(self):
+        tok = ArtifactTemplateTokenizer(extra_words=ALL_WORDS)
+        out = tokenize_sft_messages(SAMPLE_MESSAGES, tok)
+        supervised_words = [tok._word(i) for i, l in zip(out["input_ids"], out["labels"])
+                            if l != IGNORE_INDEX]
+        assert "ARTIFACT" not in supervised_words
+        assert supervised_words == [tok._word(i) for i in expected_supervised_words(tok)]
+
+    def test_fallback_path_matches_offset_path(self):
+        words = ALL_WORDS
+        primary = tokenize_sft_messages(SAMPLE_MESSAGES, TinyTokenizer(extra_words=words))
+        fallback = tokenize_sft_messages(SAMPLE_MESSAGES, NoOffsetTokenizer(extra_words=words))
+        assert primary["input_ids"] == fallback["input_ids"]
+        assert primary["labels"] == fallback["labels"]
+
+    def test_broken_template_raises_on_fallback(self):
         with pytest.raises(SftSerializationError):
-            tokenize_sft_messages(SAMPLE_MESSAGES, tok)
+            tokenize_sft_messages(SAMPLE_MESSAGES, BrokenTemplateTokenizer())
 
     def test_must_end_with_assistant(self):
         tok = TinyTokenizer()
@@ -141,6 +221,35 @@ class TestMasking:
         tok = TinyTokenizer()
         assert tokenize_sft_messages(SAMPLE_MESSAGES, tok, max_seq_len=10**6) is not None
         assert tokenize_sft_messages(SAMPLE_MESSAGES, tok, max_seq_len=5) is None
+
+    def test_chat_template_kwargs_passthrough_and_fallback(self):
+        class RecordingTokenizer(TinyTokenizer):
+            def __init__(self):
+                super().__init__(extra_words=ALL_WORDS)
+                self.seen_kwargs = []
+
+            def apply_chat_template(self, messages, tokenize=False,
+                                    add_generation_prompt=False, chat_template_kwargs=None):
+                self.seen_kwargs.append(chat_template_kwargs)
+                return super().apply_chat_template(messages, tokenize, add_generation_prompt,
+                                                   chat_template_kwargs)
+
+        tok = RecordingTokenizer()
+        kwargs = {"enable_thinking": False}
+        tokenize_sft_messages(SAMPLE_MESSAGES, tok, chat_template_kwargs=kwargs)
+        assert any(k == kwargs for k in tok.seen_kwargs)
+
+        class StrictTokenizer(TinyTokenizer):
+            def apply_chat_template(self, messages, tokenize=False,
+                                    add_generation_prompt=False, chat_template_kwargs=None):
+                if chat_template_kwargs is not None:
+                    raise TypeError("unexpected chat_template_kwargs")
+                return super().apply_chat_template(messages, tokenize, add_generation_prompt,
+                                                   None)
+
+        out = tokenize_sft_messages(SAMPLE_MESSAGES, StrictTokenizer(extra_words=ALL_WORDS),
+                                    chat_template_kwargs=kwargs)
+        assert out is not None and len(out["input_ids"]) == len(out["labels"])
 
 
 class TestRecordLevel:
@@ -159,7 +268,6 @@ class TestRecordLevel:
         assert trajectory_to_sft_record(self._fake_trajectory()) is not None
         assert trajectory_to_sft_record(self._fake_trajectory(verified=False)) is None
         assert trajectory_to_sft_record(self._fake_trajectory(clean=False)) is None
-        # explicit opt-out keeps dirty trajectories
         assert trajectory_to_sft_record(self._fake_trajectory(clean=False),
                                         require_clean=False) is not None
 
@@ -190,6 +298,6 @@ class TestRecordLevel:
 
     def test_load_rejects_corrupt(self, tmp_path):
         path = tmp_path / "bad.jsonl"
-        path.write_text('{"task_id": "x"}\n', encoding="utf-8")  # no messages
+        path.write_text('{"task_id": "x"}\n', encoding="utf-8")
         with pytest.raises(SftSerializationError):
             load_sft_records(path)

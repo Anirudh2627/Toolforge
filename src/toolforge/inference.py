@@ -131,7 +131,7 @@ class HuggingFacePolicy(StatsTrackingPolicy):
                  max_new_tokens: int = 512, do_sample: bool = False,
                  temperature: float = 0.7, top_p: float = 0.95,
                  seed: int | None = None, enable_thinking: bool = False,
-                 trust_remote_code: bool = False,
+                 trust_remote_code: bool = False, compact_catalog: bool = False,
                  tokenizer: Any = None, model: Any = None,
                  generate_fn: GenerateFn | None = None) -> None:
         self._init_stats()
@@ -146,6 +146,7 @@ class HuggingFacePolicy(StatsTrackingPolicy):
         self.seed = seed
         self.enable_thinking = enable_thinking
         self.trust_remote_code = trust_remote_code
+        self.compact_catalog = compact_catalog
         self._tokenizer = tokenizer
         self._model = model
         self._generate_fn = generate_fn
@@ -224,16 +225,25 @@ class HuggingFacePolicy(StatsTrackingPolicy):
 
     def render_prompt(self, context: PolicyContext) -> str:
         self._load()
+        messages = context.messages
+        if self.compact_catalog and messages and messages[0]["role"] == "system":
+            # Must match the training-side rendering for models SFT'd on
+            # compacted catalogs (see data_generation.compact_system_prompt).
+            from toolforge.data_generation import compact_system_prompt
+            messages = list(messages)
+            messages[0] = {"role": "system",
+                           "content": compact_system_prompt(messages[0]["content"],
+                                                            context.tools)}
         try:
             return self._tokenizer.apply_chat_template(
-                context.messages, tokenize=False, add_generation_prompt=True,
+                messages, tokenize=False, add_generation_prompt=True,
                 chat_template_kwargs={"enable_thinking": self.enable_thinking})
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             # Templates without thinking-mode support reject the kwarg; fall back
             # once, loudly, so the difference is visible in logs.
             logger.warning("Chat template rejected enable_thinking kwarg (%s); retrying without it", exc)
             return self._tokenizer.apply_chat_template(
-                context.messages, tokenize=False, add_generation_prompt=True)
+                messages, tokenize=False, add_generation_prompt=True)
 
     def __call__(self, context: PolicyContext) -> str:
         self._load()

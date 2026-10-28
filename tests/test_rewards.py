@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from toolforge.config import EnvSettings
-from toolforge.executor import EpisodeResult, Executor, ScriptedPolicy
+from toolforge.executor import EpisodeResult, ScriptedPolicy
 from toolforge.rewards import RewardConfig, RewardConfigError, compute_reward
 from toolforge.verifier import VerificationResult, verify_episode
 

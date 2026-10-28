@@ -750,7 +750,6 @@ def _assemble(task: Task, plan: _Plan, answer_all: list[str],
 
 def compile_reference_solution(task: Task) -> list[dict[str, Any]] | None:
     """Compile a task's reference action script, or ``None`` when not compilable."""
-    global _last_reason
     if len(task.tool_families) != 1:
         _last_reason[0] = "multi-family task"
         return None

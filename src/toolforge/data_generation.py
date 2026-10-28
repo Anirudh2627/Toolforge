@@ -160,6 +160,102 @@ def _guard_split(task: Task) -> None:
 
 
 # --------------------------------------------------------------------------
+# System-prompt compaction (sequence-length control)
+# --------------------------------------------------------------------------
+
+def compact_catalog(tools: list[dict[str, Any]]) -> str:
+    """One-line-per-tool catalog: name(description) + flattened arg spec.
+
+    The default system prompt renders full JSON schemas (~1.7k tokens for one
+    family), which dominates the 1024-token training budget. This rendering
+    keeps 100% of the information (descriptions, types, enums, patterns,
+    required flags) at roughly a third of the tokens.
+    """
+    lines = []
+    for tool in tools:
+        params = tool.get("parameters", {}) or {}
+        props = params.get("properties", {}) or {}
+        required = set(params.get("required", []) or [])
+        args = []
+        for name, spec in props.items():
+            desc = _flatten_schema(spec)
+            star = "" if name in required else "?"
+            args.append(f"{name}{star}:{desc}")
+        lines.append(f"- {tool['name']}({', '.join(args)}) — {tool['description']}")
+    return "\n".join(lines)
+
+
+def _flatten_schema(spec: dict[str, Any]) -> str:
+    t = spec.get("type", "any")
+    if isinstance(t, list):
+        t = "|".join(t)
+    if t == "array":
+        items = spec.get("items", {})
+        return f"[{_flatten_schema(items)}]"
+    if "enum" in spec:
+        return "|".join(json.dumps(v) for v in spec["enum"])
+    parts = [str(t)]
+    if "pattern" in spec:
+        parts.append(f"pattern={spec['pattern']}")
+    for bound in ("minimum", "maximum", "minLength", "maxLength"):
+        if bound in spec:
+            parts.append(f"{bound}={spec[bound]}")
+    return " ".join(parts)
+
+
+def compact_system_prompt(system_prompt: str, tools: list[dict[str, Any]]) -> str:
+    """Replace the JSON tool catalog inside a system prompt with the compact one.
+
+    Pure text transformation — applied identically to training records and to
+    inference/eval prompts, so the serialized grammar stays consistent. Fails
+    loudly if the catalog cannot be located (template drift), never silently.
+    """
+    start = system_prompt.find("Available tools (name, description, JSON-schema parameters):")
+    if start == -1:
+        raise DataGenerationError(
+            "System prompt does not contain the tool-catalog header; executor template drift")
+    header_end = system_prompt.index("\n", start) + 1
+    catalog_start = header_end
+    # The catalog is a JSON array rendering: find the closing "]" at line start.
+    idx = catalog_start
+    depth = 0
+    catalog_end = None
+    while idx < len(system_prompt):
+        ch = system_prompt[idx]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                catalog_end = idx + 1
+                break
+        idx += 1
+    if catalog_end is None:
+        raise DataGenerationError("Could not locate the end of the JSON tool catalog")
+    # Sanity: the extracted block must parse to exactly the trajectory's tool specs
+    # (compared as data — file storage may reorder keys).
+    extracted = system_prompt[catalog_start:catalog_end]
+    try:
+        parsed = json.loads(extracted)
+    except json.JSONDecodeError as exc:
+        raise DataGenerationError(f"Catalog block is not valid JSON: {exc}") from exc
+    if parsed != tools:
+        raise DataGenerationError("Catalog block does not match the trajectory's tool specs")
+    return (system_prompt[:header_end] + compact_catalog(tools)
+            + system_prompt[catalog_end:])
+
+
+def compact_trajectory_messages(traj: Trajectory) -> Trajectory:
+    """Return a copy of ``traj`` with a compacted system prompt (messages[0])."""
+    if not traj.messages or traj.messages[0]["role"] != "system":
+        raise DataGenerationError(f"Trajectory {traj.trajectory_id}: missing system message")
+    new_messages = list(traj.messages)
+    new_messages[0] = {"role": "system",
+                       "content": compact_system_prompt(new_messages[0]["content"], traj.tools)}
+    return Trajectory(**{**traj.to_dict(), "messages": new_messages})
+
+
+# --------------------------------------------------------------------------
 # Reference trajectories
 # --------------------------------------------------------------------------
 

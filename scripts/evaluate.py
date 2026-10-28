@@ -64,6 +64,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--greedy", dest="do_sample", action="store_false")
     p.add_argument("--temperature", type=float, default=None)
     p.add_argument("--top-p", type=float, default=None)
+    p.add_argument("--compact-catalog", action="store_true", default=None,
+                   help="Render the system-prompt tool catalog compactly. MUST match how "
+                        "the evaluated checkpoint was trained (prepare_sft_data --catalog).")
     # api policy
     p.add_argument("--api-model", default=None)
     p.add_argument("--api-base-url", default=None)
@@ -108,6 +111,8 @@ def build_policy_factory(args: argparse.Namespace, config) -> tuple[object, dict
             "device": args.device or model_cfg.device,
             "dtype": args.dtype or model_cfg.dtype,
             "enable_thinking": model_cfg.enable_thinking,
+            "compact_catalog": (model_cfg.compact_catalog
+                                if args.compact_catalog is None else args.compact_catalog),
         }
         state: dict = {"policy": None}
 
@@ -119,7 +124,8 @@ def build_policy_factory(args: argparse.Namespace, config) -> tuple[object, dict
                     max_new_tokens=generation["max_new_tokens"],
                     do_sample=generation["do_sample"],
                     temperature=generation["temperature"], top_p=generation["top_p"],
-                    seed=sampling_seed, enable_thinking=model_meta["enable_thinking"])
+                    seed=sampling_seed, enable_thinking=model_meta["enable_thinking"],
+                    compact_catalog=model_meta["compact_catalog"])
             else:
                 state["policy"].set_sampling(seed=sampling_seed)
             return state["policy"]

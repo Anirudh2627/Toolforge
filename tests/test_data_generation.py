@@ -199,3 +199,55 @@ class TestSftMix:
         assert path.exists()
         assert (tmp_path / "unit_stats.json").exists()
         assert json.loads((tmp_path / "unit_stats.json").read_text())["kept"] == 1
+
+
+class TestCatalogCompaction:
+    def test_compact_catalog_preserves_information(self, registry):
+        from toolforge.data_generation import compact_catalog
+        from toolforge.schemas import render_tool_catalog
+        specs = registry.tool_specs(["calendar"])
+        tools = [s.to_dict() for s in specs]
+        compact = compact_catalog(tools)
+        full = render_tool_catalog(specs)
+        assert len(compact) < len(full) * 0.6, "compaction should save substantial tokens"
+        for spec in specs:
+            assert spec.name in compact
+            assert spec.description in compact
+        # required vs optional markers and type/pattern info survive
+        assert "title:string" in compact and "date?:string" in compact
+        assert r"\d{4}-\d{2}-\d{2}" in compact
+        assert '"scheduled"|' in compact or "scheduled" in compact
+
+    def test_compact_system_prompt_roundtrip(self, executor, small_calendar_fixture):
+        from toolforge.data_generation import DataGenerationError, compact_system_prompt
+        task = make_task_with_fixture(small_calendar_fixture)
+        router, ctx = executor.initial_context(task)
+        original = ctx.messages[0]["content"]
+        compacted = compact_system_prompt(original, ctx.tools)
+        assert "Available tools (name, description, JSON-schema parameters):" in compacted
+        assert "- calendar.create_event(" in compacted
+        assert '"parameters"' not in compacted          # JSON catalog is gone
+        assert "EXACTLY ONE JSON object" in compacted   # grammar section untouched
+        assert len(compacted) < len(original)
+        with pytest.raises(DataGenerationError):
+            compact_system_prompt("no header here", ctx.tools)
+
+    def test_compact_trajectory_messages(self, train_pool):
+        from toolforge.data_generation import (compact_trajectory_messages,
+                                               generate_reference_trajectories)
+        executor = Executor(default_registry())
+        trajs, _ = generate_reference_trajectories(train_pool[:3], executor)
+        assert trajs, "reference generation must produce trajectories"
+        compacted = compact_trajectory_messages(trajs[0])
+        assert compacted.messages[0]["content"] != trajs[0].messages[0]["content"]
+        assert compacted.messages[1:] == trajs[0].messages[1:]
+        assert compacted.verified == trajs[0].verified
+        assert compacted.tools == trajs[0].tools
+
+
+def make_task_with_fixture(fixture):
+    from toolforge.tasks import ExpectedOutcome, Task
+    return Task(task_id="t-compact", family="calendar", request="Create an event.",
+                category="single_step_selection", difficulty="easy", fixture=fixture,
+                fixture_seed=0, expected=ExpectedOutcome(), max_steps=4,
+                source="handwritten", benchmark_seed=0, benchmark_version="test")

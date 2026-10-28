@@ -9,7 +9,6 @@ collator, Trainer stepping, checkpointing/resume, and adapter save/load.
 from __future__ import annotations
 
 import dataclasses
-import json
 
 import pytest
 

@@ -13,11 +13,13 @@ task-completion accuracy of a small open model on tool-use tasks, including unse
 families, without an unacceptable increase in latency or inference cost?* The experiments
 will determine the answer; nothing is assumed.
 
-> **Status: Phases 1–2 complete** (foundation: environments, executor, verifier,
+> **Status: Phases 1–3 complete** (foundation: environments, executor, verifier,
 > benchmark; evaluation: inference policies, metrics with CIs, resumable runner,
-> latency/cost benchmarking, MCP adapter). Phases 3–6 (SFT, GRPO, ablations,
-> Colab/demo) follow. **No results are reported anywhere in this repository
-> until real runs exist.**
+> latency/cost benchmarking, MCP adapter; training data: reference-solution
+> compiler, rejection-sampled rollouts, rewards, SFT serialization verified
+> against the real Qwen3 tokenizer, QLoRA training path). Phases 4–6 (GRPO,
+> ablations, Colab/demo) follow. **No results are reported anywhere in this
+> repository until real runs exist.**
 
 ---
 
@@ -59,14 +61,31 @@ ToolForge/
 │   ├── metrics.py               # aggregation, Wilson + bootstrap CIs, clarification P/R/F1
 │   ├── evaluation.py            # preflight, resumable runner, per-task prediction records
 │   ├── benchmarking.py          # latency/throughput/token/cost measurement (labeled estimates)
+│   ├── rewards.py               # verifier-backed reward components + dominance validation
+│   ├── trajectories.py          # trajectory records (request, messages, verdict, reward, provenance)
+│   ├── reference_solutions.py   # compiles verified action scripts from expected-outcome specs
+│   ├── data_generation.py       # reference + rollout collection, rejection sampling, SFT mixing
+│   ├── sft_data.py              # messages -> masked token ids (assistant-only loss), collator data
+│   ├── sft.py                   # QLoRA/LoRA training on the masked data (transformers 4.5x/5.x shims)
+│   ├── checkpointing.py         # fingerprints, atomic metadata, resume discovery, adapter merge/export
 │   ├── mcp_adapter.py           # OPTIONAL MCP server over the same envs (core never imports it)
 │   └── environments/            # base.py, calendar.py, email.py, files.py, crm.py, sql.py,
 │                                # todo.py, pools.py, registry.py
 ├── scripts/generate_tasks.py    # regenerate data/tasks/benchmark_v1.jsonl
 ├── scripts/evaluate.py          # evaluate any policy on any split (resumable)
 ├── scripts/benchmark_inference.py  # latency / throughput / token / cost measurement
-├── tests/                       # 316 CPU-only tests (no model downloads)
+├── scripts/generate_trajectories.py  # reference solutions + rejection-sampled rollouts
+├── scripts/prepare_sft_data.py  # trajectories -> messages-level SFT JSONL (mix + hygiene)
+├── scripts/train_sft.py         # QLoRA/LoRA training (--smoke for a 2-step stack check)
+├── scripts/export_model.py      # merge adapter into base weights (licensing noted)
+├── scripts/check_train_env.py   # compatibility probe: run on the training machine first
+├── scripts/validate_qwen3_serialization.py  # masking validation on the real tokenizer
+├── configs/sft.yaml             # SFT settings (strict validation)
+├── requirements-train.txt       # pinned training stack (verified together, see file)
+├── tests/                       # 393 CPU-only tests (no model downloads; torch tests skip if absent)
 ├── data/tasks/                  # generated benchmark (JSONL + summary)
+├── data/trajectories/           # collected trajectories + stats (generated)
+├── data/sft/                    # tokenizer-free SFT records (generated)
 └── configs, LICENSE (.env.example, requirements*.txt, pyproject.toml)
 ```
 
@@ -91,7 +110,8 @@ executor, verifier, and benchmark generation run on any CPU (verified on 3.11).
 ## Tests
 
 ```bash
-python -m pytest tests/ -q          # 316 tests, ~2 s, CPU-only, no downloads
+python -m pytest tests/ -q          # 392 tests, CPU-only, no model downloads
+                                    # (training-stack tests skip cleanly without torch)
 ```
 
 Covered: schema validation and action parsing (incl. malformed-output categories),
@@ -280,6 +300,104 @@ compatibility surface for external MCP clients. The core package never imports
 structured `{"ok": ..., "error": {...}}` payloads as the executor.
 Developed against mcp 2.3.0 (v2 low-level API, with a v1 fallback path).
 
+## Training data & SFT (Phase 3)
+
+### Trajectory collection
+
+```bash
+# 1) Deterministic reference solutions (CPU, no model, ~1s):
+python scripts/generate_trajectories.py --source reference
+#    -> data/trajectories/reference_trainval.jsonl (133/133 verified, 100% coverage)
+
+# 2) Self-generated rollouts with rejection sampling (GPU; base or SFT policy):
+python scripts/generate_trajectories.py --source rollout --policy hf \
+    --model-id Qwen/Qwen3-0.6B --samples-per-task 4 --do-sample
+
+# 3) Optional teacher rollouts (only with an explicitly configured API key):
+python scripts/generate_trajectories.py --source rollout --policy api \
+    --api-model <teacher> --source-label teacher --samples-per-task 2
+```
+
+- **Reference solutions are compiled from the tasks' declarative expected
+  outcomes** (`reference_solutions.py`), then executed and verifier-checked —
+  only verified episodes are kept, with coverage reported per category (never
+  forced). Retrieval trajectories always *observe* the answer in a tool result
+  before stating it (evidence-first compilation), and multi-step flows use
+  runtime-resolved placeholders (`{"$prev": "draft.id"}`) so draft→send and
+  create→update chains carry real ids.
+- **Rejection sampling** for model rollouts: keep verifier-passed episodes;
+  stats record rejection rate, per-category rejections, and failure categories.
+  A measured random-policy baseline verifies ~1.5% — reference data is the
+  working seed, exactly as the spec anticipates for unaided small models.
+- **Split hygiene is enforced in code**: collecting on `test` raises; the SFT
+  mix refuses test-split and held-out-family (`crm`) trajectories loudly.
+
+### SFT data preparation (tokenizer-free) and serialization
+
+```bash
+python scripts/prepare_sft_data.py \
+    --trajectories data/trajectories/reference_trainval.jsonl \
+    --catalog compact --max-per-task 2
+# -> data/sft/sft_train.jsonl (116), sft_val.jsonl (17), sft_stats.json
+```
+
+Serialization contract (one grammar everywhere — training, inference, eval):
+
+- Records are message lists rendered by the tokenizer's own chat template.
+- **Loss on assistant tokens only.** Masking is character-offset based
+  (`return_offsets_mapping`), locating each assistant message's content in the
+  full render and extending to the template's end-of-turn tokens; tool
+  observations, system text, and template artifacts are never supervised. A
+  strict token-prefix fallback covers offset-less tokenizers and *raises*
+  rather than guessing. Verified against the real Qwen3 template
+  (`scripts/validate_qwen3_serialization.py`), including Qwen3's
+  position-dependent empty-think injection under `enable_thinking=False`.
+- Over-long samples are **dropped and counted**, never silently truncated.
+- **Compact tool catalog** (`--catalog compact`, default): the full JSON
+  catalog costs ~1.7k tokens/family; the compact one-line-per-tool rendering
+  keeps all information at ~⅓ the size. Measured with the real Qwen3
+  tokenizer on the reference set: median 1400→790 tokens/sample, >1024-token
+  share 85%→35%. Checkpoints trained on compact catalogs must be evaluated
+  with `evaluate.py --compact-catalog` (recorded in run metadata).
+
+### Training
+
+```bash
+python scripts/check_train_env.py            # compatibility probe — run first
+python scripts/train_sft.py --config configs/sft.yaml --smoke   # 2-step stack check
+python scripts/train_sft.py --config configs/sft.yaml --use-4bit --gradient-checkpointing
+python scripts/train_sft.py --config configs/sft.yaml --resume    # after an interrupted session
+python scripts/export_model.py --adapter outputs/checkpoints/sft/adapter-final \
+    --base-model Qwen/Qwen3-0.6B --out outputs/merged/sft-0.6b
+```
+
+- Plain `transformers.Trainer` + PEFT LoRA (r=16, α=32, all attention+MLP
+  projections) + optional 4-bit NF4 via bitsandbytes. TRL's SFT API is
+  deliberately not used (version-drift risk); TRL is reserved for GRPO.
+- Version shims support transformers 4.5x **and** 5.x (`torch_dtype`/`dtype`,
+  `evaluation_strategy`/`eval_strategy`); `check_train_env.py` reports the
+  resolved stack and probes the TRL GRPO API shape for Phase 4.
+- Every run writes `run_metadata.json`: settings, seeds, library versions,
+  data-file fingerprints, dataset stats (incl. dropped-too-long counts),
+  trainable-parameter count, final train/eval loss, resume provenance.
+- 4-bit without CUDA **fails loudly** — no silent precision fallbacks.
+- The full training path (load → LoRA → masked data → Trainer → checkpoint →
+  resume → adapter save/reload → metadata) is tested end-to-end on a tiny
+  random-weight model in CI (`tests/test_sft_integration.py`); real Qwen3 runs
+  happen on your GPU.
+
+### Reward function (groundwork for Phase 4 GRPO)
+
+`rewards.py` computes shaped rewards strictly from verifier verdicts:
+verified success (+1.0) dominates; invalid calls, executed-call cost,
+step-limit, loop-guard, wrong-clarification, and policy-error are non-positive
+penalties; `format_bonus` defaults to 0 and is capped at 10% of success.
+`RewardConfig.validate(max_steps)` **rejects configurations where the worst
+successful episode could score below the best failed episode** — dominance is
+enforced at startup, not hoped for. Every component is returned for logging.
+Adversarial cases are unit-tested (lying final answers earn 0; repeated no-ops
+can never accumulate reward).
+
 ## Results
 
 | Model | Overall success | Seen families | Held-out (crm) | Invalid-call rate | Latency/task |
@@ -294,10 +412,13 @@ No cell in this table will be filled from anything other than saved evaluation r
 
 - **Phase 2 — done** (evaluation harness: policies, metrics + CIs, resumable
   runner, preflight/fingerprints, benchmarking, MCP adapter).
-- **Phase 3** — trajectories + SFT: reference/self-generated trajectories with rejection
-  sampling, chat-template serialization (loss masked on tool observations), QLoRA training,
-  pinned torch/transformers/peft/trl versions (`requirements-train.txt`).
-- **Phase 4** — GRPO on top of the SFT policy using the verifier-backed reward.
+- **Phase 3 — done** (reference-solution compiler at 100% train/val coverage,
+  rejection-sampled rollouts, rewards with enforced dominance, offset-based
+  assistant-only masking validated on the real Qwen3 template, compact catalog,
+  QLoRA/LoRA training path tested end-to-end on a tiny model, pinned+probed
+  training stack).
+- **Phase 4** — GRPO on top of the SFT policy using the verifier-backed reward
+  (TRL 1.16 `GRPOTrainer(reward_funcs=...)` API already probed green).
 - **Phase 5** — ablations, plots from real evaluation files only, `compare_models.py`.
 - **Phase 6** — Colab notebook, Streamlit demo, full report.
 
@@ -350,6 +471,23 @@ stack rather than guessed here.
   hourly rate; the sandbox has no GPU, so no GPU cost measurement exists yet.
 - **MCP adapter** is verified against mcp 2.3.0 in-process; the v1 fallback path is
   present but not exercised by tests (mcp<2 is not installed here).
+
+### Phase 3 (data & SFT)
+
+- **Real-model SFT has not run in this workspace** (no GPU here): the training path is
+  tested end-to-end on a tiny random-weight model, and serialization/masking is validated
+  against the real Qwen3 *tokenizer*; the first real QLoRA run happens on your Colab GPU
+  (`train_sft.py --smoke` first). Report back any stack mismatch — `check_train_env.py`
+  exists precisely to surface those before burning GPU time.
+- **Reference-solution quality**: compiled trajectories are verifier-optimal but
+  stylistically terse (final answers are formulaic). They are a *seed* set; self/teacher
+  rollouts (Phase 3 collection path) are the mechanism for more natural diversity.
+- **Compact catalog** changes only the system prompt's tool-list rendering; grammar,
+  action format, and tool semantics are untouched. Mixing checkpoints trained with
+  different catalog renderings is flagged via run metadata — do not compare them
+  without re-training (Phase 5 enforces fingerprint checks).
+- At `max_seq_len=1536`, ~16% of reference samples (long SQL/evidence chains) are still
+  dropped; the count is reported in every run's metadata rather than hidden.
 
 ## License
 

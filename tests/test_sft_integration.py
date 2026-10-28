@@ -22,6 +22,8 @@ from toolforge.sft_data import save_sft_records
 
 from test_sft_data import SAMPLE_MESSAGES
 
+# Anchor-stable template: rendering with add_generation_prompt=True is a strict
+# token prefix of the full rendering (the property inference + masking rely on).
 CHAT_TEMPLATE = (
     "{% for m in messages %}"
     "<|fim_prefix|>{{ m['role'] }}\n{{ m['content'] }}<|fim_suffix|>\n"

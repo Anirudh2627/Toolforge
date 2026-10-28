@@ -68,6 +68,7 @@ class Trajectory:
     final_output: str | None
     verified: bool
     verification: dict[str, Any]
+    tools: list[dict[str, Any]] = field(default_factory=list)  # model-visible catalog
     reward: dict[str, Any] | None = None
     tool_call_count: int = 0
     invalid_call_count: int = 0
@@ -122,7 +123,8 @@ def trajectory_from_episode(task: Task, episode: EpisodeResult, verdict: Verific
         sampling_seed=sampling_seed, request=task.request,
         messages=messages_from_episode(task, episode), actions=actions,
         termination=episode.termination, final_output=episode.final_output,
-        verified=verdict.success, verification=verdict.to_dict(), reward=reward,
+        verified=verdict.success, verification=verdict.to_dict(),
+        tools=episode.tools, reward=reward,
         tool_call_count=episode.tool_call_count, invalid_call_count=episode.invalid_call_count,
         parse_error_count=episode.parse_error_count,
         tools_fingerprint=tools_fingerprint,

@@ -90,6 +90,11 @@ class SftSettings:
     max_train_samples: int | None = None
     max_val_samples: int | None = None
     trust_remote_code: bool = False
+    # Passed to tokenizer.apply_chat_template at tokenization time. Must match
+    # the inference-side setting (HuggingFacePolicy) so training and evaluation
+    # serialize identically. Qwen3: thinking mode OFF for tool calling.
+    chat_template_kwargs: dict[str, Any] = field(
+        default_factory=lambda: {"enable_thinking": False})
     lora: LoraSettings = field(default_factory=LoraSettings)
 
     def resolved_output_dir(self) -> Path:
@@ -214,8 +219,10 @@ def _from_pretrained_kwargs(dtype_name: str, quantization_config: Any) -> dict[s
         kw["quantization_config"] = quantization_config
     else:
         import torch
-        torch_dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16,
-                       "float32": torch.float32}[dtype_name]
+        # Precision names are the short config spellings (bf16/fp16/fp32)
+        # everywhere in this module — one vocabulary, no translation layers.
+        torch_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16,
+                       "fp32": torch.float32}[dtype_name]
         kw[_model_dtype_kwarg_name()] = torch_dtype
     return kw
 
@@ -259,7 +266,8 @@ def load_model_and_tokenizer(settings: SftSettings) -> tuple[Any, Any, dict[str,
                            "set use_4bit=False for CPU debugging runs")
         try:
             from transformers import BitsAndBytesConfig
-            import bitsandbytes  # noqa: F401  (fail early with a clear message)
+            import bitsandbytes as _bnb  # availability probe: fail early with a clear message
+            assert _bnb.__version__
         except ImportError as exc:
             raise SftError(f"use_4bit=True requires bitsandbytes: {exc}") from exc
         compute_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16,
@@ -309,7 +317,8 @@ class TorchSftDataset:
     """Minimal torch Dataset over tokenized samples (avoids a datasets dependency)."""
 
     def __init__(self, tokenized: TokenizedSftDataset) -> None:
-        import torch  # noqa: F401  (fail early if torch missing)
+        import torch  # availability probe: fail early if torch is missing
+        assert torch.utils.data.Dataset  # noqa: B018 - deliberate reference
         self._samples = tokenized.samples
         self.dropped_too_long = tokenized.dropped_too_long
 
@@ -341,13 +350,16 @@ def make_collator(pad_token_id: int):
 
 def prepare_datasets(settings: SftSettings, tokenizer: Any
                      ) -> tuple[TorchSftDataset, TorchSftDataset | None, dict[str, Any]]:
-    train_tok = tokenize_sft_file(settings.train_file, tokenizer, settings.max_seq_len)
+    template_kwargs = settings.chat_template_kwargs or None
+    train_tok = tokenize_sft_file(settings.train_file, tokenizer, settings.max_seq_len,
+                                  chat_template_kwargs=template_kwargs)
     if settings.max_train_samples:
         train_tok.samples = train_tok.samples[:settings.max_train_samples]
     val_tok = None
     val_path = Path(settings.val_file)
     if val_path.exists():
-        val_tok = tokenize_sft_file(val_path, tokenizer, settings.max_seq_len)
+        val_tok = tokenize_sft_file(val_path, tokenizer, settings.max_seq_len,
+                                    chat_template_kwargs=template_kwargs)
         if settings.max_val_samples:
             val_tok.samples = val_tok.samples[:settings.max_val_samples]
     else:
