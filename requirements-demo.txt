@@ -1,0 +1,5 @@
+# Demo dependencies (Phase 6). The demo core itself needs only the core
+# requirements; streamlit powers the UI. Model-backed policies additionally
+# need requirements-train.txt (loaded only on explicit user action).
+-r requirements.txt
+streamlit>=1.35

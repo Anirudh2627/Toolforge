@@ -36,6 +36,6 @@ report = ["matplotlib>=3.8"]
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-q"
