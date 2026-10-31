@@ -430,6 +430,20 @@ class GrpoTrainer:
                 episode = executor.run(task, policy)
                 verdict = verify_episode(task, episode)
                 reward = compute_reward(episode, verdict, s.reward, max_steps=task.max_steps)
+                logger.info(
+    "ROLLOUT DEBUG | task=%s generation=%d | termination=%s | "
+    "success=%s | reward=%s | reward_components=%s | "
+    "invalid_calls=%d | tool_calls=%d | trace=%s",
+    task.task_id,
+    g,
+    episode.termination,
+    verdict.success,
+    reward.total,
+    reward.components,
+    episode.invalid_call_count,
+    episode.tool_call_count,
+    episode.trace,
+)
                 episodes.append(episode)
                 verdicts.append(verdict)
                 rewards.append(reward.total)
