@@ -1,3 +1,0 @@
-# Core (CPU-only) requirements: environments, executor, verifier, benchmark.
-# Phase 3 adds requirements-train.txt with pinned torch/transformers/peft/trl.
-PyYAML>=6.0,<7
